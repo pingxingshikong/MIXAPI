@@ -8,11 +8,11 @@ import (
 
 // ChannelStatistics 按渠道统计的数据结构
 type ChannelStatistics struct {
-	Time       string `json:"time"`
-	ChannelId  int    `json:"channel_id"`
+	Time        string `json:"time"`
+	ChannelId   int    `json:"channel_id"`
 	ChannelName string `json:"channel_name"`
-	Quota      int    `json:"quota"`
-	Count      int    `json:"count"`
+	Quota       int    `json:"quota"`
+	Count       int    `json:"count"`
 }
 
 // TokenStatistics 按令牌统计的数据结构
@@ -31,17 +31,69 @@ type UserStatistics struct {
 	Count    int    `json:"count"`
 }
 
+// LogSummary 日志汇总结构
+type LogSummary struct {
+	Date             string  `json:"date"`
+	TokenName        string  `json:"token_name"`
+	ModelName        string  `json:"model_name"`
+	TotalRequests    int     `json:"total_requests"`
+	SuccessRequests  int     `json:"success_requests"`
+	SuccessRate      float64 `json:"success_rate"`
+	TotalTokens      int64   `json:"total_tokens"`
+	PromptTokens     int64   `json:"prompt_tokens"`
+	CompletionTokens int64   `json:"completion_tokens"`
+	TotalQuota       int     `json:"total_quota"`
+}
+
 // GetChannelStatistics 获取按渠道统计的数据
 func GetChannelStatistics(startTimestamp, endTimestamp int, username, tokenName, modelName string, channel int, group, defaultTime string) ([]ChannelStatistics, error) {
 	var statistics []ChannelStatistics
 
+	// 构建时间格式化表达式和SELECT字段
+	var timeField string
+	switch defaultTime {
+	case "hour":
+		if common.UsingMySQL {
+			timeField = "DATE_FORMAT(FROM_UNIXTIME(created_at), '%Y-%m-%d %H:00:00') as time_group"
+		} else if common.UsingPostgreSQL {
+			timeField = "TO_CHAR(TO_TIMESTAMP(created_at), 'YYYY-MM-DD HH24:00:00') as time_group"
+		} else {
+			// SQLite
+			timeField = "strftime('%Y-%m-%d %H:00:00', datetime(created_at, 'unixepoch')) as time_group"
+		}
+	case "day":
+		if common.UsingMySQL {
+			timeField = "DATE_FORMAT(FROM_UNIXTIME(created_at), '%Y-%m-%d') as time_group"
+		} else if common.UsingPostgreSQL {
+			timeField = "TO_CHAR(TO_TIMESTAMP(created_at), 'YYYY-MM-DD') as time_group"
+		} else {
+			// SQLite
+			timeField = "strftime('%Y-%m-%d', datetime(created_at, 'unixepoch')) as time_group"
+		}
+	case "week":
+		if common.UsingMySQL {
+			timeField = "DATE_FORMAT(FROM_UNIXTIME(created_at), '%Y-%U') as time_group"
+		} else if common.UsingPostgreSQL {
+			timeField = "TO_CHAR(TO_TIMESTAMP(created_at), 'YYYY-IW') as time_group"
+		} else {
+			// SQLite
+			timeField = "strftime('%Y-%W', datetime(created_at, 'unixepoch')) as time_group"
+		}
+	default:
+		if common.UsingMySQL {
+			timeField = "DATE_FORMAT(FROM_UNIXTIME(created_at), '%Y-%m-%d') as time_group"
+		} else if common.UsingPostgreSQL {
+			timeField = "TO_CHAR(TO_TIMESTAMP(created_at), 'YYYY-MM-DD') as time_group"
+		} else {
+			// SQLite
+			timeField = "strftime('%Y-%m-%d', datetime(created_at, 'unixepoch')) as time_group"
+		}
+	}
+
 	// 构建查询条件
-	tx := LOG_DB.Table("logs").Select(`
-		created_at,
-		channel_id,
-		COUNT(*) as count,
-		SUM(quota) as quota
-	`).Where("type = ?", 2) // LogTypeConsume = 2
+	tx := LOG_DB.Table("logs").Select(
+		timeField+", channel_id, COUNT(*) as count, SUM(quota) as quota, MIN(created_at) as min_created_at",
+	).Where("type = ?", 2) // LogTypeConsume = 2
 
 	if username != "" {
 		tx = tx.Where("username = ?", username)
@@ -65,56 +117,16 @@ func GetChannelStatistics(startTimestamp, endTimestamp int, username, tokenName,
 		tx = tx.Where("created_at <= ?", endTimestamp)
 	}
 
-	// 按时间粒度分组 - 使用数据库无关的函数
-	var groupBy string
-	switch defaultTime {
-	case "hour":
-		if common.UsingMySQL {
-			groupBy = "channel_id, DATE_FORMAT(FROM_UNIXTIME(created_at), '%Y-%m-%d %H:00:00')"
-		} else if common.UsingPostgreSQL {
-			groupBy = "channel_id, TO_CHAR(TO_TIMESTAMP(created_at), 'YYYY-MM-DD HH24:00:00')"
-		} else {
-			// SQLite
-			groupBy = "channel_id, strftime('%Y-%m-%d %H:00:00', datetime(created_at, 'unixepoch'))"
-		}
-	case "day":
-		if common.UsingMySQL {
-			groupBy = "channel_id, DATE_FORMAT(FROM_UNIXTIME(created_at), '%Y-%m-%d')"
-		} else if common.UsingPostgreSQL {
-			groupBy = "channel_id, TO_CHAR(TO_TIMESTAMP(created_at), 'YYYY-MM-DD')"
-		} else {
-			// SQLite
-			groupBy = "channel_id, strftime('%Y-%m-%d', datetime(created_at, 'unixepoch'))"
-		}
-	case "week":
-		if common.UsingMySQL {
-			groupBy = "channel_id, DATE_FORMAT(FROM_UNIXTIME(created_at), '%Y-%U')"
-		} else if common.UsingPostgreSQL {
-			groupBy = "channel_id, TO_CHAR(TO_TIMESTAMP(created_at), 'YYYY-IW')"
-		} else {
-			// SQLite
-			groupBy = "channel_id, strftime('%Y-%W', datetime(created_at, 'unixepoch'))"
-		}
-	default:
-		if common.UsingMySQL {
-			groupBy = "channel_id, DATE_FORMAT(FROM_UNIXTIME(created_at), '%Y-%m-%d')"
-		} else if common.UsingPostgreSQL {
-			groupBy = "channel_id, TO_CHAR(TO_TIMESTAMP(created_at), 'YYYY-MM-DD')"
-		} else {
-			// SQLite
-			groupBy = "channel_id, strftime('%Y-%m-%d', datetime(created_at, 'unixepoch'))"
-		}
-	}
-
 	// 按渠道和时间分组
-	tx = tx.Group(groupBy).Order("MIN(created_at) ASC")
+	tx = tx.Group("time_group, channel_id").Order("min_created_at ASC")
 
 	// 执行查询
 	var results []struct {
-		CreatedAt  int64 `json:"created_at"`
-		ChannelId  int   `json:"channel_id"`
-		Count      int   `json:"count"`
-		Quota      int   `json:"quota"`
+		TimeGroup    string `json:"time_group"`
+		ChannelId    int    `json:"channel_id"`
+		Count        int    `json:"count"`
+		Quota        int    `json:"quota"`
+		MinCreatedAt int64  `json:"min_created_at"`
 	}
 
 	err := tx.Scan(&results).Error
@@ -144,11 +156,10 @@ func GetChannelStatistics(startTimestamp, endTimestamp int, username, tokenName,
 		}
 	}
 
-	// 格式化时间并构建返回结果
+	// 构建返回结果
 	for _, result := range results {
-		timeStr := formatTime(result.CreatedAt, defaultTime)
 		statistics = append(statistics, ChannelStatistics{
-			Time:        timeStr,
+			Time:        result.TimeGroup,
 			ChannelId:   result.ChannelId,
 			ChannelName: channelMap[result.ChannelId],
 			Quota:       result.Quota,
@@ -163,13 +174,51 @@ func GetChannelStatistics(startTimestamp, endTimestamp int, username, tokenName,
 func GetTokenStatistics(startTimestamp, endTimestamp int, username, tokenName, modelName string, channel int, group, defaultTime string) ([]TokenStatistics, error) {
 	var statistics []TokenStatistics
 
+	// 构建时间格式化表达式和SELECT字段
+	var timeField string
+	switch defaultTime {
+	case "hour":
+		if common.UsingMySQL {
+			timeField = "DATE_FORMAT(FROM_UNIXTIME(created_at), '%Y-%m-%d %H:00:00') as time_group"
+		} else if common.UsingPostgreSQL {
+			timeField = "TO_CHAR(TO_TIMESTAMP(created_at), 'YYYY-MM-DD HH24:00:00') as time_group"
+		} else {
+			// SQLite
+			timeField = "strftime('%Y-%m-%d %H:00:00', datetime(created_at, 'unixepoch')) as time_group"
+		}
+	case "day":
+		if common.UsingMySQL {
+			timeField = "DATE_FORMAT(FROM_UNIXTIME(created_at), '%Y-%m-%d') as time_group"
+		} else if common.UsingPostgreSQL {
+			timeField = "TO_CHAR(TO_TIMESTAMP(created_at), 'YYYY-MM-DD') as time_group"
+		} else {
+			// SQLite
+			timeField = "strftime('%Y-%m-%d', datetime(created_at, 'unixepoch')) as time_group"
+		}
+	case "week":
+		if common.UsingMySQL {
+			timeField = "DATE_FORMAT(FROM_UNIXTIME(created_at), '%Y-%U') as time_group"
+		} else if common.UsingPostgreSQL {
+			timeField = "TO_CHAR(TO_TIMESTAMP(created_at), 'YYYY-IW') as time_group"
+		} else {
+			// SQLite
+			timeField = "strftime('%Y-%W', datetime(created_at, 'unixepoch')) as time_group"
+		}
+	default:
+		if common.UsingMySQL {
+			timeField = "DATE_FORMAT(FROM_UNIXTIME(created_at), '%Y-%m-%d') as time_group"
+		} else if common.UsingPostgreSQL {
+			timeField = "TO_CHAR(TO_TIMESTAMP(created_at), 'YYYY-MM-DD') as time_group"
+		} else {
+			// SQLite
+			timeField = "strftime('%Y-%m-%d', datetime(created_at, 'unixepoch')) as time_group"
+		}
+	}
+
 	// 构建查询条件
-	tx := LOG_DB.Table("logs").Select(`
-		created_at,
-		token_name,
-		COUNT(*) as count,
-		SUM(quota) as quota
-	`).Where("type = ?", 2) // LogTypeConsume = 2
+	tx := LOG_DB.Table("logs").Select(
+		timeField+", token_name, COUNT(*) as count, SUM(quota) as quota, MIN(created_at) as min_created_at",
+	).Where("type = ?", 2) // LogTypeConsume = 2
 
 	if username != "" {
 		tx = tx.Where("username = ?", username)
@@ -193,56 +242,16 @@ func GetTokenStatistics(startTimestamp, endTimestamp int, username, tokenName, m
 		tx = tx.Where("created_at <= ?", endTimestamp)
 	}
 
-	// 按时间粒度分组 - 使用数据库无关的函数
-	var groupBy string
-	switch defaultTime {
-	case "hour":
-		if common.UsingMySQL {
-			groupBy = "token_name, DATE_FORMAT(FROM_UNIXTIME(created_at), '%Y-%m-%d %H:00:00')"
-		} else if common.UsingPostgreSQL {
-			groupBy = "token_name, TO_CHAR(TO_TIMESTAMP(created_at), 'YYYY-MM-DD HH24:00:00')"
-		} else {
-			// SQLite
-			groupBy = "token_name, strftime('%Y-%m-%d %H:00:00', datetime(created_at, 'unixepoch'))"
-		}
-	case "day":
-		if common.UsingMySQL {
-			groupBy = "token_name, DATE_FORMAT(FROM_UNIXTIME(created_at), '%Y-%m-%d')"
-		} else if common.UsingPostgreSQL {
-			groupBy = "token_name, TO_CHAR(TO_TIMESTAMP(created_at), 'YYYY-MM-DD')"
-		} else {
-			// SQLite
-			groupBy = "token_name, strftime('%Y-%m-%d', datetime(created_at, 'unixepoch'))"
-		}
-	case "week":
-		if common.UsingMySQL {
-			groupBy = "token_name, DATE_FORMAT(FROM_UNIXTIME(created_at), '%Y-%U')"
-		} else if common.UsingPostgreSQL {
-			groupBy = "token_name, TO_CHAR(TO_TIMESTAMP(created_at), 'YYYY-IW')"
-		} else {
-			// SQLite
-			groupBy = "token_name, strftime('%Y-%W', datetime(created_at, 'unixepoch'))"
-		}
-	default:
-		if common.UsingMySQL {
-			groupBy = "token_name, DATE_FORMAT(FROM_UNIXTIME(created_at), '%Y-%m-%d')"
-		} else if common.UsingPostgreSQL {
-			groupBy = "token_name, TO_CHAR(TO_TIMESTAMP(created_at), 'YYYY-MM-DD')"
-		} else {
-			// SQLite
-			groupBy = "token_name, strftime('%Y-%m-%d', datetime(created_at, 'unixepoch'))"
-		}
-	}
-
 	// 按令牌和时间分组
-	tx = tx.Group(groupBy).Order("MIN(created_at) ASC")
+	tx = tx.Group("time_group, token_name").Order("min_created_at ASC")
 
 	// 执行查询
 	var results []struct {
-		CreatedAt int64  `json:"created_at"`
-		TokenName string `json:"token_name"`
-		Count     int    `json:"count"`
-		Quota     int    `json:"quota"`
+		TimeGroup    string `json:"time_group"`
+		TokenName    string `json:"token_name"`
+		Count        int    `json:"count"`
+		Quota        int    `json:"quota"`
+		MinCreatedAt int64  `json:"min_created_at"`
 	}
 
 	err := tx.Scan(&results).Error
@@ -250,11 +259,10 @@ func GetTokenStatistics(startTimestamp, endTimestamp int, username, tokenName, m
 		return nil, err
 	}
 
-	// 格式化时间并构建返回结果
+	// 构建返回结果
 	for _, result := range results {
-		timeStr := formatTime(result.CreatedAt, defaultTime)
 		statistics = append(statistics, TokenStatistics{
-			Time:      timeStr,
+			Time:      result.TimeGroup,
 			TokenName: result.TokenName,
 			Quota:     result.Quota,
 			Count:     result.Count,
@@ -268,13 +276,51 @@ func GetTokenStatistics(startTimestamp, endTimestamp int, username, tokenName, m
 func GetUserStatistics(startTimestamp, endTimestamp int, username, tokenName, modelName string, channel int, group, defaultTime string) ([]UserStatistics, error) {
 	var statistics []UserStatistics
 
+	// 构建时间格式化表达式和SELECT字段
+	var timeField string
+	switch defaultTime {
+	case "hour":
+		if common.UsingMySQL {
+			timeField = "DATE_FORMAT(FROM_UNIXTIME(created_at), '%Y-%m-%d %H:00:00') as time_group"
+		} else if common.UsingPostgreSQL {
+			timeField = "TO_CHAR(TO_TIMESTAMP(created_at), 'YYYY-MM-DD HH24:00:00') as time_group"
+		} else {
+			// SQLite
+			timeField = "strftime('%Y-%m-%d %H:00:00', datetime(created_at, 'unixepoch')) as time_group"
+		}
+	case "day":
+		if common.UsingMySQL {
+			timeField = "DATE_FORMAT(FROM_UNIXTIME(created_at), '%Y-%m-%d') as time_group"
+		} else if common.UsingPostgreSQL {
+			timeField = "TO_CHAR(TO_TIMESTAMP(created_at), 'YYYY-MM-DD') as time_group"
+		} else {
+			// SQLite
+			timeField = "strftime('%Y-%m-%d', datetime(created_at, 'unixepoch')) as time_group"
+		}
+	case "week":
+		if common.UsingMySQL {
+			timeField = "DATE_FORMAT(FROM_UNIXTIME(created_at), '%Y-%U') as time_group"
+		} else if common.UsingPostgreSQL {
+			timeField = "TO_CHAR(TO_TIMESTAMP(created_at), 'YYYY-IW') as time_group"
+		} else {
+			// SQLite
+			timeField = "strftime('%Y-%W', datetime(created_at, 'unixepoch')) as time_group"
+		}
+	default:
+		if common.UsingMySQL {
+			timeField = "DATE_FORMAT(FROM_UNIXTIME(created_at), '%Y-%m-%d') as time_group"
+		} else if common.UsingPostgreSQL {
+			timeField = "TO_CHAR(TO_TIMESTAMP(created_at), 'YYYY-MM-DD') as time_group"
+		} else {
+			// SQLite
+			timeField = "strftime('%Y-%m-%d', datetime(created_at, 'unixepoch')) as time_group"
+		}
+	}
+
 	// 构建查询条件
-	tx := LOG_DB.Table("logs").Select(`
-		created_at,
-		username,
-		COUNT(*) as count,
-		SUM(quota) as quota
-	`).Where("type = ?", 2) // LogTypeConsume = 2
+	tx := LOG_DB.Table("logs").Select(
+		timeField+", username, COUNT(*) as count, SUM(quota) as quota, MIN(created_at) as min_created_at",
+	).Where("type = ?", 2) // LogTypeConsume = 2
 
 	if username != "" {
 		tx = tx.Where("username = ?", username)
@@ -298,56 +344,16 @@ func GetUserStatistics(startTimestamp, endTimestamp int, username, tokenName, mo
 		tx = tx.Where("created_at <= ?", endTimestamp)
 	}
 
-	// 按时间粒度分组 - 使用数据库无关的函数
-	var groupBy string
-	switch defaultTime {
-	case "hour":
-		if common.UsingMySQL {
-			groupBy = "username, DATE_FORMAT(FROM_UNIXTIME(created_at), '%Y-%m-%d %H:00:00')"
-		} else if common.UsingPostgreSQL {
-			groupBy = "username, TO_CHAR(TO_TIMESTAMP(created_at), 'YYYY-MM-DD HH24:00:00')"
-		} else {
-			// SQLite
-			groupBy = "username, strftime('%Y-%m-%d %H:00:00', datetime(created_at, 'unixepoch'))"
-		}
-	case "day":
-		if common.UsingMySQL {
-			groupBy = "username, DATE_FORMAT(FROM_UNIXTIME(created_at), '%Y-%m-%d')"
-		} else if common.UsingPostgreSQL {
-			groupBy = "username, TO_CHAR(TO_TIMESTAMP(created_at), 'YYYY-MM-DD')"
-		} else {
-			// SQLite
-			groupBy = "username, strftime('%Y-%m-%d', datetime(created_at, 'unixepoch'))"
-		}
-	case "week":
-		if common.UsingMySQL {
-			groupBy = "username, DATE_FORMAT(FROM_UNIXTIME(created_at), '%Y-%U')"
-		} else if common.UsingPostgreSQL {
-			groupBy = "username, TO_CHAR(TO_TIMESTAMP(created_at), 'YYYY-IW')"
-		} else {
-			// SQLite
-			groupBy = "username, strftime('%Y-%W', datetime(created_at, 'unixepoch'))"
-		}
-	default:
-		if common.UsingMySQL {
-			groupBy = "username, DATE_FORMAT(FROM_UNIXTIME(created_at), '%Y-%m-%d')"
-		} else if common.UsingPostgreSQL {
-			groupBy = "username, TO_CHAR(TO_TIMESTAMP(created_at), 'YYYY-MM-DD')"
-		} else {
-			// SQLite
-			groupBy = "username, strftime('%Y-%m-%d', datetime(created_at, 'unixepoch'))"
-		}
-	}
-
 	// 按用户和时间分组
-	tx = tx.Group(groupBy).Order("MIN(created_at) ASC")
+	tx = tx.Group("time_group, username").Order("min_created_at ASC")
 
 	// 执行查询
 	var results []struct {
-		CreatedAt int64  `json:"created_at"`
-		Username  string `json:"username"`
-		Count     int    `json:"count"`
-		Quota     int    `json:"quota"`
+		TimeGroup    string `json:"time_group"`
+		Username     string `json:"username"`
+		Count        int    `json:"count"`
+		Quota        int    `json:"quota"`
+		MinCreatedAt int64  `json:"min_created_at"`
 	}
 
 	err := tx.Scan(&results).Error
@@ -355,11 +361,10 @@ func GetUserStatistics(startTimestamp, endTimestamp int, username, tokenName, mo
 		return nil, err
 	}
 
-	// 格式化时间并构建返回结果
+	// 构建返回结果
 	for _, result := range results {
-		timeStr := formatTime(result.CreatedAt, defaultTime)
 		statistics = append(statistics, UserStatistics{
-			Time:     timeStr,
+			Time:     result.TimeGroup,
 			Username: result.Username,
 			Quota:    result.Quota,
 			Count:    result.Count,
@@ -369,7 +374,189 @@ func GetUserStatistics(startTimestamp, endTimestamp int, username, tokenName, mo
 	return statistics, nil
 }
 
-// formatTime 根据时间粒度格式化时间
+// buildSuccessRateSQL 构建成功率计算SQL,兼容不同数据库
+func buildSuccessRateSQL() string {
+	if common.UsingMySQL {
+		// MySQL: 直接使用数值除法,MySQL会自动转换为DECIMAL
+		return "ROUND(SUM(CASE WHEN type = 2 THEN 1 ELSE 0 END) * 100.0 / COUNT(*), 2)"
+	} else if common.UsingPostgreSQL {
+		// PostgreSQL: 使用CAST AS FLOAT
+		return "ROUND(CAST(SUM(CASE WHEN type = 2 THEN 1 ELSE 0 END) AS FLOAT) * 100.0 / COUNT(*), 2)"
+	} else {
+		// SQLite: 使用CAST AS REAL
+		return "ROUND(CAST(SUM(CASE WHEN type = 2 THEN 1 ELSE 0 END) AS REAL) * 100.0 / COUNT(*), 2)"
+	}
+}
+
+// GetMonthlySummary 获取月度汇总数据
+func GetMonthlySummary(startTimestamp, endTimestamp int64, page, pageSize int) ([]LogSummary, int64, error) {
+	var summaries []LogSummary
+	var total int64
+
+	// 构建时间格式化字段
+	var dateField, groupBy string
+	if common.UsingMySQL {
+		dateField = "DATE_FORMAT(FROM_UNIXTIME(created_at), '%Y-%m') as date"
+		groupBy = "DATE_FORMAT(FROM_UNIXTIME(created_at), '%Y-%m'), token_name, model_name"
+	} else if common.UsingPostgreSQL {
+		dateField = "TO_CHAR(TO_TIMESTAMP(created_at), 'YYYY-MM') as date"
+		groupBy = "TO_CHAR(TO_TIMESTAMP(created_at), 'YYYY-MM'), token_name, model_name"
+	} else {
+		dateField = "strftime('%Y-%m', datetime(created_at, 'unixepoch')) as date"
+		groupBy = "strftime('%Y-%m', datetime(created_at, 'unixepoch')), token_name, model_name"
+	}
+
+	// 构建成功率计算SQL
+	successRateSQL := buildSuccessRateSQL()
+
+	// 完整的SELECT语句
+	selectSQL := dateField + `,
+		token_name,
+		model_name,
+		COUNT(*) as total_requests,
+		SUM(CASE WHEN type = 2 THEN 1 ELSE 0 END) as success_requests,
+		` + successRateSQL + ` as success_rate,
+		SUM(prompt_tokens + completion_tokens) as total_tokens,
+		SUM(prompt_tokens) as prompt_tokens,
+		SUM(completion_tokens) as completion_tokens,
+		SUM(quota) as total_quota`
+
+	// 构建子查询
+	subQuery := LOG_DB.Table("logs").
+		Select(selectSQL).
+		Where("created_at >= ? AND created_at <= ?", startTimestamp, endTimestamp).
+		Group(groupBy)
+
+	// 获取总数
+	if err := LOG_DB.Table("(?) as summary", subQuery).Count(&total).Error; err != nil {
+		return nil, 0, err
+	}
+
+	// 分页查询
+	offset := (page - 1) * pageSize
+	if err := LOG_DB.Table("(?) as summary", subQuery).
+		Offset(offset).
+		Limit(pageSize).
+		Scan(&summaries).Error; err != nil {
+		return nil, 0, err
+	}
+
+	return summaries, total, nil
+}
+
+// GetDailySummary 获取日度汇总数据
+func GetDailySummary(startTimestamp, endTimestamp int64, page, pageSize int) ([]LogSummary, int64, error) {
+	var summaries []LogSummary
+	var total int64
+
+	// 构建时间格式化字段
+	var dateField, groupBy string
+	if common.UsingMySQL {
+		dateField = "DATE_FORMAT(FROM_UNIXTIME(created_at), '%Y-%m-%d') as date"
+		groupBy = "DATE_FORMAT(FROM_UNIXTIME(created_at), '%Y-%m-%d'), token_name, model_name"
+	} else if common.UsingPostgreSQL {
+		dateField = "TO_CHAR(TO_TIMESTAMP(created_at), 'YYYY-MM-DD') as date"
+		groupBy = "TO_CHAR(TO_TIMESTAMP(created_at), 'YYYY-MM-DD'), token_name, model_name"
+	} else {
+		dateField = "strftime('%Y-%m-%d', datetime(created_at, 'unixepoch')) as date"
+		groupBy = "strftime('%Y-%m-%d', datetime(created_at, 'unixepoch')), token_name, model_name"
+	}
+
+	// 构建成功率计算SQL
+	successRateSQL := buildSuccessRateSQL()
+
+	// 完整的SELECT语句
+	selectSQL := dateField + `,
+		token_name,
+		model_name,
+		COUNT(*) as total_requests,
+		SUM(CASE WHEN type = 2 THEN 1 ELSE 0 END) as success_requests,
+		` + successRateSQL + ` as success_rate,
+		SUM(prompt_tokens + completion_tokens) as total_tokens,
+		SUM(prompt_tokens) as prompt_tokens,
+		SUM(completion_tokens) as completion_tokens,
+		SUM(quota) as total_quota`
+
+	// 构建子查询
+	subQuery := LOG_DB.Table("logs").
+		Select(selectSQL).
+		Where("created_at >= ? AND created_at <= ?", startTimestamp, endTimestamp).
+		Group(groupBy)
+
+	// 获取总数
+	if err := LOG_DB.Table("(?) as summary", subQuery).Count(&total).Error; err != nil {
+		return nil, 0, err
+	}
+
+	// 分页查询
+	offset := (page - 1) * pageSize
+	if err := LOG_DB.Table("(?) as summary", subQuery).
+		Offset(offset).
+		Limit(pageSize).
+		Scan(&summaries).Error; err != nil {
+		return nil, 0, err
+	}
+
+	return summaries, total, nil
+}
+
+// GetHourlySummary 获取小时汇总数据
+func GetHourlySummary(startTimestamp, endTimestamp int64, page, pageSize int) ([]LogSummary, int64, error) {
+	var summaries []LogSummary
+	var total int64
+
+	// 构建时间格式化字段
+	var dateField, groupBy string
+	if common.UsingMySQL {
+		dateField = "DATE_FORMAT(FROM_UNIXTIME(created_at), '%Y-%m-%d %H:00:00') as date"
+		groupBy = "DATE_FORMAT(FROM_UNIXTIME(created_at), '%Y-%m-%d %H:00:00'), token_name, model_name"
+	} else if common.UsingPostgreSQL {
+		dateField = "TO_CHAR(TO_TIMESTAMP(created_at), 'YYYY-MM-DD HH24:00:00') as date"
+		groupBy = "TO_CHAR(TO_TIMESTAMP(created_at), 'YYYY-MM-DD HH24:00:00'), token_name, model_name"
+	} else {
+		dateField = "strftime('%Y-%m-%d %H:00:00', datetime(created_at, 'unixepoch')) as date"
+		groupBy = "strftime('%Y-%m-%d %H:00:00', datetime(created_at, 'unixepoch')), token_name, model_name"
+	}
+
+	// 构建成功率计算SQL
+	successRateSQL := buildSuccessRateSQL()
+
+	// 完整的SELECT语句
+	selectSQL := dateField + `,
+		token_name,
+		model_name,
+		COUNT(*) as total_requests,
+		SUM(CASE WHEN type = 2 THEN 1 ELSE 0 END) as success_requests,
+		` + successRateSQL + ` as success_rate,
+		SUM(prompt_tokens + completion_tokens) as total_tokens,
+		SUM(prompt_tokens) as prompt_tokens,
+		SUM(completion_tokens) as completion_tokens,
+		SUM(quota) as total_quota`
+
+	// 构建子查询
+	subQuery := LOG_DB.Table("logs").
+		Select(selectSQL).
+		Where("created_at >= ? AND created_at <= ?", startTimestamp, endTimestamp).
+		Group(groupBy)
+
+	// 获取总数
+	if err := LOG_DB.Table("(?) as summary", subQuery).Count(&total).Error; err != nil {
+		return nil, 0, err
+	}
+
+	// 分页查询
+	offset := (page - 1) * pageSize
+	if err := LOG_DB.Table("(?) as summary", subQuery).
+		Offset(offset).
+		Limit(pageSize).
+		Scan(&summaries).Error; err != nil {
+		return nil, 0, err
+	}
+
+	return summaries, total, nil
+}
+
+// formatTime 根据时间粒度格式化时间（保留此函数以防需要）
 func formatTime(timestamp int64, defaultTime string) string {
 	t := time.Unix(timestamp, 0)
 	switch defaultTime {
